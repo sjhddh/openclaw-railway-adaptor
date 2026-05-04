@@ -99,19 +99,38 @@ fi
 export OPENCLAW_GATEWAY_PORT="$port"
 export OPENCLAW_GATEWAY_BIND="lan"
 
-# Auto-repair config schema drift before exec'ing the gateway. This handles
-# users coming from an older upstream version (or a different openclaw
-# template like moltbot) where on-disk config layout has since changed.
-# `doctor --fix` is openclaw's own self-repair tool — it's idempotent on
-# already-valid config, and the gateway's startup error explicitly
-# recommends running it. Set OPENCLAW_AUTOFIX_CONFIG=0 to disable.
+# Auto-repair config schema drift on FIRST boot only. This handles users
+# coming from an older upstream version (or a different openclaw template
+# like moltbot) where on-disk config layout has since changed.
+#
+# After the first run, a sentinel file is written to /data and doctor is
+# skipped on subsequent boots. This prevents doctor from re-enabling
+# automatically-detected models on every restart, which can pin invalid
+# entries (wrong provider namespace, unsupported thinking levels, etc.)
+# into the user's config and crash the agent.
+#
+# Knobs:
+#   OPENCLAW_AUTOFIX_CONFIG=0          disable doctor entirely
+#   OPENCLAW_AUTOFIX_CONFIG_ALWAYS=1   run doctor on every boot (legacy behavior)
 run_doctor_fix() {
-    if [ "${OPENCLAW_AUTOFIX_CONFIG:-1}" = "1" ]; then
-        printf 'openclaw-railway-adaptor: running config doctor --fix '
-        printf '(set OPENCLAW_AUTOFIX_CONFIG=0 to disable)\n'
-        "$@" node /app/openclaw.mjs doctor --fix 2>&1 || \
-            printf >&2 'WARN: openclaw doctor --fix returned non-zero; gateway may still fail.\n'
+    [ "${OPENCLAW_AUTOFIX_CONFIG:-1}" = "1" ] || return 0
+    doctor_sentinel="/data/.openclaw-railway-doctored-v1"
+    if [ -f "$doctor_sentinel" ] && [ "${OPENCLAW_AUTOFIX_CONFIG_ALWAYS:-0}" != "1" ]; then
+        printf 'openclaw-railway-adaptor: skipping doctor --fix (already ran on a previous boot;\n'
+        printf '  set OPENCLAW_AUTOFIX_CONFIG_ALWAYS=1 to re-run, or delete\n'
+        printf '  %s to force one-shot)\n' "$doctor_sentinel"
+        return 0
     fi
+    printf 'openclaw-railway-adaptor: running config doctor --fix '
+    printf '(first boot; set OPENCLAW_AUTOFIX_CONFIG=0 to disable)\n'
+    "$@" node /app/openclaw.mjs doctor --fix 2>&1 || \
+        printf >&2 'WARN: openclaw doctor --fix returned non-zero; gateway may still fail.\n'
+    # Mark doctor as having run regardless of exit code — repeated runs on
+    # already-fixed config tend to flap (the auto-enable behavior is the
+    # whole reason this is a one-shot now). User can delete the sentinel
+    # if they want it to run again.
+    touch "$doctor_sentinel" 2>/dev/null && \
+        chown node:node "$doctor_sentinel" 2>/dev/null || true
 }
 
 if [ "$(id -u)" = "0" ]; then
