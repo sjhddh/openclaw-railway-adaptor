@@ -5,7 +5,7 @@
 **One-click [Railway](https://railway.com) deployment for [openclaw](https://github.com/openclaw/openclaw)**
 *Always tracking the latest upstream image, with zero manual maintenance.*
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/REPLACE_WITH_TEMPLATE_ID?utm_medium=integration&utm_source=button&utm_campaign=openclaw)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/openclaw-on-railway-by-jsun?referralCode=0GX52R&utm_medium=integration&utm_source=button&utm_campaign=openclaw)
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Upstream](https://img.shields.io/badge/upstream-openclaw%2Fopenclaw-2ea44f)](https://github.com/openclaw/openclaw)
@@ -16,7 +16,7 @@
 </div>
 
 > [!NOTE]
-> The Deploy button URL is a placeholder. After you fork this repo and follow [Maintainer setup](#maintainer-setup) once, replace `REPLACE_WITH_TEMPLATE_ID` with the ID Railway returns when you publish a template.
+> If you fork this repo, replace the Deploy button URL above with your own Railway template URL — see [Maintainer setup](#maintainer-setup) for how to publish one. The current button points at the canonical template published from this repo.
 
 ---
 
@@ -147,7 +147,7 @@ By default `--allow-unconfigured` is passed so the gateway boots without keys
    - Confirm the volume + mount path are captured in the template.
    - Publish the template.
 7. **Update the Deploy button** in this README:
-   - Replace `REPLACE_WITH_TEMPLATE_ID` with the ID Railway gives you (visible in the `railway.com/new/template/<ID>` URL).
+   - Replace the URL after `[![Deploy on Railway](https://railway.com/button.svg)]` with the URL Railway returned when you published — typically `https://railway.com/deploy/<slug>?referralCode=<your-code>` (Railway gives you the full URL on the template page).
    - Commit + push.
 
 After step 7, anyone clicking Deploy spawns a fresh Railway project from
