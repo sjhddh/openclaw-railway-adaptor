@@ -2,9 +2,11 @@
 # OpenClaw Railway entrypoint.
 #
 # Runs as root to chown the Railway-mounted volume at /data (volumes can come
-# up root-owned, blocking the non-root node user). Validates required env,
-# ensures state directories exist, then drops privileges to node and execs
-# the upstream gateway with Railway-friendly bind/port flags.
+# up root-owned, blocking the non-root node user). If the operator supplied a
+# gateway token, validates its strength. Otherwise, lets upstream openclaw
+# auto-generate one on first start (the value is persisted under
+# OPENCLAW_STATE_DIR — find it in `gateway.json` after first boot). Drops
+# privileges to the node user via gosu, then execs the upstream gateway.
 
 set -eu
 
@@ -12,8 +14,12 @@ state_dir="${OPENCLAW_STATE_DIR:-/data/.openclaw}"
 workspace_dir="${OPENCLAW_WORKSPACE_DIR:-/data/workspace}"
 port="${PORT:-8080}"
 
+printf 'openclaw-railway-adaptor: starting (port=%s, state=%s)\n' \
+    "$port" "$state_dir"
+
 if [ "$(id -u)" = "0" ]; then
-    chown node:node /data 2>/dev/null || true
+    chown node:node /data 2>/dev/null || \
+        printf >&2 'WARN: could not chown /data (already correct, or readonly mount)\n'
     install -d -m 0755 -o node -g node "$state_dir" "$workspace_dir" 2>/dev/null || {
         printf >&2 'ERROR: cannot create state dirs under /data.\n'
         printf >&2 '       Attach a Railway volume at /data, or override\n'
@@ -35,9 +41,12 @@ if command -v mountpoint >/dev/null 2>&1; then
     fi
 fi
 
-# Token validation: must be present, non-whitespace, ≥24 chars. The wrapper
-# binds to LAN (0.0.0.0) via --bind lan, so the gateway is publicly reachable
-# through the Railway proxy. A weak/blank token would publicly expose it.
+# Token policy:
+#   - If OPENCLAW_GATEWAY_TOKEN (or _PASSWORD) is set: validate strength.
+#   - If unset: do nothing — upstream openclaw auto-generates a strong token
+#     on first start when binding beyond loopback (per upstream's render.yaml
+#     `generateValue: true` precedent). The auto-gen value is written to the
+#     gateway's state and surfaced in the gateway logs / state file.
 tok=""
 if [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
     tok="$OPENCLAW_GATEWAY_TOKEN"
@@ -45,52 +54,47 @@ elif [ -n "${OPENCLAW_GATEWAY_PASSWORD:-}" ]; then
     tok="$OPENCLAW_GATEWAY_PASSWORD"
 fi
 
-if [ -z "$tok" ]; then
-    printf >&2 'ERROR: OPENCLAW_GATEWAY_TOKEN (or OPENCLAW_GATEWAY_PASSWORD) is\n'
-    printf >&2 '       required. The gateway binds to LAN and refuses to start\n'
-    printf >&2 '       unauthenticated. Generate one with:\n'
-    printf >&2 '         openssl rand -hex 32\n'
-    printf >&2 '       Add it as a Railway service variable, then redeploy.\n'
-    exit 1
+if [ -n "$tok" ]; then
+    tok_clean=$(printf '%s' "$tok" | tr -d '[:space:]')
+    if [ "$tok_clean" != "$tok" ]; then
+        printf >&2 'ERROR: gateway token contains whitespace. Regenerate with:\n'
+        printf >&2 '         openssl rand -hex 32\n'
+        exit 1
+    fi
+    tok_len=$(printf '%s' "$tok" | wc -c | tr -d '[:space:]')
+    if [ "$tok_len" -lt 24 ]; then
+        printf >&2 'ERROR: gateway token too short (%d chars; need at least 24).\n' "$tok_len"
+        printf >&2 '       Regenerate with: openssl rand -hex 32\n'
+        exit 1
+    fi
+    printf 'openclaw-railway-adaptor: using operator-supplied gateway token\n'
+    unset tok_clean tok_len
+else
+    printf 'openclaw-railway-adaptor: no token set; upstream will auto-generate\n'
+    printf '  (find it in %s/gateway.json after first boot, or set\n' "$state_dir"
+    printf '   OPENCLAW_GATEWAY_TOKEN as a service variable)\n'
 fi
+unset tok
 
-# Compare against a tab/space/newline-stripped copy. POSIX-portable (avoids
-# command substitution inside case patterns, which behaves inconsistently
-# across shells when the substitution result is empty).
-tok_clean=$(printf '%s' "$tok" | tr -d '[:space:]')
-if [ "$tok_clean" != "$tok" ]; then
-    printf >&2 'ERROR: gateway token contains whitespace. Regenerate with:\n'
-    printf >&2 '         openssl rand -hex 32\n'
-    exit 1
-fi
-
-tok_len=$(printf '%s' "$tok" | wc -c | tr -d '[:space:]')
-if [ "$tok_len" -lt 24 ]; then
-    printf >&2 'ERROR: gateway token too short (%d chars; need at least 24).\n' "$tok_len"
-    printf >&2 '       Regenerate with: openssl rand -hex 32\n'
-    exit 1
-fi
-unset tok tok_clean tok_len
-
-# Build argv. --allow-unconfigured lets the gateway boot without LLM keys so
-# the user can configure via UI/API after deploy. Set OPENCLAW_REQUIRE_CONFIGURED=1
-# to disable this and require a fully-configured deploy.
+# Build argv for the gateway. --allow-unconfigured is on by default so the
+# gateway boots without LLM keys (configure via UI/API after deploy). Set
+# OPENCLAW_REQUIRE_CONFIGURED=1 to disable.
 set -- gateway --bind lan --port "$port"
 if [ "${OPENCLAW_REQUIRE_CONFIGURED:-}" != "1" ]; then
     set -- "$@" --allow-unconfigured
 fi
 
-# Drop privileges if running as root.
+# Mirror the port into upstream's env-var path too (belt & suspenders against
+# upstream changes to flag parsing).
+export OPENCLAW_GATEWAY_PORT="$port"
+export OPENCLAW_GATEWAY_BIND="lan"
+
 if [ "$(id -u)" = "0" ]; then
-    if command -v runuser >/dev/null 2>&1; then
-        exec runuser -u node -- node /app/openclaw.mjs "$@"
-    elif command -v su >/dev/null 2>&1; then
-        # Pass argv through positional params to su's child shell.
-        exec su -s /bin/sh node -c \
-            'exec node /app/openclaw.mjs "$@"' \
-            -- "$@"
+    if command -v gosu >/dev/null 2>&1; then
+        printf 'openclaw-railway-adaptor: dropping privileges (root -> node) via gosu\n'
+        exec gosu node node /app/openclaw.mjs "$@"
     else
-        printf >&2 'WARN: no runuser/su available; running gateway as root.\n'
+        printf >&2 'WARN: gosu missing; running gateway as root (degraded).\n'
         exec node /app/openclaw.mjs "$@"
     fi
 else

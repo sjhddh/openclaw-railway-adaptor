@@ -11,14 +11,19 @@ FROM ghcr.io/openclaw/openclaw@sha256:142f70fa2751bdedf03648ae427372fff3f92ac0e9
 
 USER root
 
-# Pre-create the volume mount target. Railway mounts a volume on top of /data
-# at runtime; the actual ownership is decided by the volume, not the image.
-# start.sh runs as root and chowns /data before dropping to the node user, so
-# the volume's initial mode/ownership doesn't matter.
-RUN install -d -m 0755 -o node -g node /data
+# Install gosu (~2 MB, single static binary) for reliable drop-privileges.
+# bookworm-slim moved `runuser` into util-linux-extra and `su` argument-passing
+# is fiddly across implementations; gosu is the standard container drop-priv
+# tool. Pre-create the volume mount target so Railway volumes inherit
+# node:node ownership when first mounted.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gosu && \
+    rm -rf /var/lib/apt/lists/* && \
+    install -d -m 0755 -o node -g node /data
 
-# Entrypoint shim: chowns the mounted volume, validates env, drops privileges
-# to the node user, and execs the upstream gateway with --bind lan --port $PORT.
+# Entrypoint shim: chowns the mounted volume (root only), validates env if
+# the operator provided a token, drops to the node user via gosu, and execs
+# the upstream gateway with --bind lan --port $PORT.
 COPY start.sh /usr/local/bin/openclaw-railway-start.sh
 RUN chmod 755 /usr/local/bin/openclaw-railway-start.sh
 
