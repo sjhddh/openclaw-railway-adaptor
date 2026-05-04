@@ -93,14 +93,32 @@ fi
 export OPENCLAW_GATEWAY_PORT="$port"
 export OPENCLAW_GATEWAY_BIND="lan"
 
+# Auto-repair config schema drift before exec'ing the gateway. This handles
+# users coming from an older upstream version (or a different openclaw
+# template like moltbot) where on-disk config layout has since changed.
+# `doctor --fix` is openclaw's own self-repair tool — it's idempotent on
+# already-valid config, and the gateway's startup error explicitly
+# recommends running it. Set OPENCLAW_AUTOFIX_CONFIG=0 to disable.
+run_doctor_fix() {
+    if [ "${OPENCLAW_AUTOFIX_CONFIG:-1}" = "1" ]; then
+        printf 'openclaw-railway-adaptor: running config doctor --fix '
+        printf '(set OPENCLAW_AUTOFIX_CONFIG=0 to disable)\n'
+        "$@" node /app/openclaw.mjs doctor --fix 2>&1 || \
+            printf >&2 'WARN: openclaw doctor --fix returned non-zero; gateway may still fail.\n'
+    fi
+}
+
 if [ "$(id -u)" = "0" ]; then
     if command -v gosu >/dev/null 2>&1; then
         printf 'openclaw-railway-adaptor: dropping privileges (root -> node) via gosu\n'
+        run_doctor_fix gosu node
         exec gosu node node /app/openclaw.mjs "$@"
     else
         printf >&2 'WARN: gosu missing; running gateway as root (degraded).\n'
+        run_doctor_fix
         exec node /app/openclaw.mjs "$@"
     fi
 else
+    run_doctor_fix
     exec node /app/openclaw.mjs "$@"
 fi
