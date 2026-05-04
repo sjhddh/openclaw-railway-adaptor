@@ -18,12 +18,18 @@ printf 'openclaw-railway-adaptor: starting (port=%s, state=%s)\n' \
     "$port" "$state_dir"
 
 if [ "$(id -u)" = "0" ]; then
-    # Reclaim the entire /data tree for the node user (uid 1000). Railway
-    # volumes can come up with files from a previous template's setup that
-    # are owned by a different uid — without -R, our gateway fails to read
-    # /data/<state_dir>/openclaw.json with EACCES on first boot.
-    chown -R node:node /data 2>/dev/null || \
-        printf >&2 'WARN: chown -R /data failed; some files may remain unreadable.\n'
+    # Reclaim /data for the node user only when needed. On first boot
+    # (or after a different template's leftovers), files may be owned by
+    # another uid — gateway fails with EACCES. On subsequent reboots the
+    # tree is already node-owned, so a full recursive chown wastes minutes
+    # iterating thousands of files. Sentinel file marks completion.
+    sentinel="/data/.openclaw-railway-chowned-v1"
+    if [ ! -f "$sentinel" ] || [ "$(stat -c %u /data 2>/dev/null)" != "1000" ]; then
+        printf 'openclaw-railway-adaptor: reclaiming /data for node user (one-time)\n'
+        chown -R node:node /data 2>/dev/null || \
+            printf >&2 'WARN: chown -R /data failed; some files may remain unreadable.\n'
+        touch "$sentinel" 2>/dev/null && chown node:node "$sentinel" 2>/dev/null || true
+    fi
     install -d -m 0755 -o node -g node "$state_dir" "$workspace_dir" 2>/dev/null || {
         printf >&2 'ERROR: cannot create state dirs under /data.\n'
         printf >&2 '       Attach a Railway volume at /data, or override\n'

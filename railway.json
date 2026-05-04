@@ -6,7 +6,7 @@
   },
   "deploy": {
     "healthcheckPath": "/healthz",
-    "healthcheckTimeout": 300,
+    "healthcheckTimeout": 900,
     "restartPolicyType": "ALWAYS",
     "numReplicas": 1,
     "requiredMountPath": "/data"
