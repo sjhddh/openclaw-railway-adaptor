@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          shellcheck \
+            start.sh \
+            scripts/resolve-upstream-digest.sh \
+            scripts/smoke-test.sh
+
+  validate-config:
+    name: Validate Dockerfile and railway.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Dockerfile FROM line is digest-pinned
+        run: |
+          if ! grep -qE "^FROM ghcr\.io/openclaw/openclaw@sha256:[0-9a-f]{64}$" Dockerfile; then
+            echo "::error::Dockerfile FROM must be digest-pinned (sha256:...)"
+            grep -n "^FROM" Dockerfile
+            exit 1
+          fi
+
+      - name: Verify railway.json is valid JSON
+        run: python3 -m json.tool railway.json > /dev/null
+
+      - name: Verify Dockerfile pin matches GHCR for current tag
+        run: |
+          tag=$(tr -d '[:space:]' < UPSTREAM_TAG)
+          pinned=$(awk '/^FROM ghcr\.io\/openclaw\/openclaw@sha256:/ { sub(/^.*@/, ""); print; exit }' Dockerfile | tr -d '[:space:]')
+          resolved=$(bash scripts/resolve-upstream-digest.sh "$tag")
+          echo "Tag: $tag"
+          echo "Pinned: $pinned"
+          echo "Resolved: $resolved"
+          if [ "$pinned" != "$resolved" ]; then
+            echo "::warning::Pinned digest differs from current $tag. The next sync-upstream run will reconcile."
+          fi
+
+  build:
+    name: Build wrapper image and smoke-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build wrapper image
+        run: docker build --tag openclaw-railway:ci .
+
+      - name: Smoke-test wrapper image
+        env:
+          OPENCLAW_GATEWAY_TOKEN: ci-test-token-not-secret-but-required-by-start-sh-validation
+        run: |
+          set -euo pipefail
+          docker run --detach \
+            --name oc-ci \
+            --env "OPENCLAW_GATEWAY_TOKEN=$OPENCLAW_GATEWAY_TOKEN" \
+            --env "PORT=8080" \
+            --publish 8080:8080 \
+            openclaw-railway:ci
+          ok=0
+          for i in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              ok=1
+              echo "Healthcheck OK after ${i} attempts"
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" != "1" ]; then
+            docker logs oc-ci 2>&1 | tail -200 || true
+            docker rm --force oc-ci || true
+            exit 1
+          fi
+          docker rm --force oc-ci || true

@@ -1,0 +1,29 @@
+openclaw-railway-adaptor
+========================
+
+This repository is a Railway deployment adapter for the openclaw project.
+It is licensed under the MIT License (see LICENSE).
+
+The Docker image deployed at runtime is the upstream
+ghcr.io/openclaw/openclaw image, which is governed by openclaw's own
+copyright and license terms:
+
+    OpenClaw — https://github.com/openclaw/openclaw
+    License: MIT
+    Copyright (c) the openclaw contributors
+
+The upstream LICENSE file is bundled inside the image at /app/LICENSE
+(mirrored from https://github.com/openclaw/openclaw/blob/main/LICENSE)
+and is preserved on every redistribution by virtue of using the upstream
+image as a base.
+
+This adapter repo neither modifies nor redistributes openclaw source code.
+It only:
+  - References the upstream image by digest in Dockerfile
+  - Adds a thin entrypoint (start.sh) for env validation and Railway-friendly
+    bind/port flags
+  - Provides Railway and GitHub Actions configuration
+
+Trademarks, logos, and project names are the property of their respective
+owners. This project is not affiliated with, endorsed by, or sponsored by
+openclaw.

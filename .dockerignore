@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+.gitignore
+.dockerignore
+.env
+.env.*
+*.md
+LICENSE
+NOTICE
+UPSTREAM_TAG
+railway.json
+scripts

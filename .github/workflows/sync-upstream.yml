@@ -1,0 +1,168 @@
+name: sync-upstream
+
+# Daily resolves UPSTREAM_TAG on ghcr.io/openclaw/openclaw to its current
+# manifest digest, smoke-tests the new image, and rewrites the FROM line in
+# Dockerfile if the digest has moved. The committed Dockerfile change triggers
+# Railway to redeploy.
+#
+# Smoke test note: this job tests the *upstream* image directly (without the
+# wrapper). The wrapper itself (Dockerfile + start.sh) is exercised by ci.yml's
+# build job on every push. So a wrapper-side regression is caught at CI time;
+# an upstream regression is caught here before the bump commit lands.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - UPSTREAM_TAG
+      - .github/workflows/sync-upstream.yml
+      - scripts/resolve-upstream-digest.sh
+      - scripts/smoke-test.sh
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Resolve and pin upstream digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream tag to digest
+        id: resolve
+        run: |
+          tag=$(tr -d '[:space:]' < UPSTREAM_TAG)
+          digest=$(bash scripts/resolve-upstream-digest.sh "$tag")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Resolved $tag -> $digest"
+
+      - name: Read current pinned digest from Dockerfile
+        id: current
+        run: |
+          current=$(awk '/^FROM ghcr\.io\/openclaw\/openclaw@sha256:/ { sub(/^.*@/, ""); print; exit }' Dockerfile | tr -d '[:space:]')
+          if ! printf '%s' "$current" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+            echo "::error::Could not parse current digest from Dockerfile (got: '$current')"
+            exit 1
+          fi
+          echo "digest=$current" >> "$GITHUB_OUTPUT"
+          echo "Currently pinned: $current"
+
+      - name: Decide whether to bump
+        id: decide
+        run: |
+          if [ "${{ steps.current.outputs.digest }}" = "${{ steps.resolve.outputs.digest }}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No change needed — pinned digest is already current."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Bump: ${{ steps.current.outputs.digest }} -> ${{ steps.resolve.outputs.digest }}"
+          fi
+
+      - name: Smoke-test new image
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          SMOKE_TIMEOUT_SECS: "180"
+        run: |
+          bash scripts/smoke-test.sh \
+            "ghcr.io/openclaw/openclaw@${{ steps.resolve.outputs.digest }}"
+
+      - name: Rewrite Dockerfile FROM line
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          NEW_DIGEST: ${{ steps.resolve.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib
+          path = pathlib.Path("Dockerfile")
+          new_digest = os.environ["NEW_DIGEST"]
+          text = path.read_text()
+          updated, n = re.subn(
+              r"^(FROM ghcr\.io/openclaw/openclaw@)sha256:[0-9a-f]{64}",
+              rf"\g<1>{new_digest}",
+              text,
+              flags=re.MULTILINE,
+          )
+          if n != 1:
+              raise SystemExit(
+                  f"Expected exactly 1 FROM line to rewrite; matched {n}. "
+                  "Refusing to commit an ambiguous rewrite."
+              )
+          path.write_text(updated)
+          PY
+
+      - name: Verify rewrite
+        if: steps.decide.outputs.changed == 'true'
+        run: |
+          if ! grep -qE "^FROM ghcr\.io/openclaw/openclaw@${{ steps.resolve.outputs.digest }}$" Dockerfile; then
+            echo "::error::Dockerfile rewrite verification failed"
+            grep -n "^FROM" Dockerfile
+            exit 1
+          fi
+
+      - name: Commit and push
+        if: steps.decide.outputs.changed == 'true'
+        env:
+          NEW_TAG: ${{ steps.resolve.outputs.tag }}
+          NEW_DIGEST: ${{ steps.resolve.outputs.digest }}
+          OLD_DIGEST: ${{ steps.current.outputs.digest }}
+        run: |
+          git config user.name "openclaw-railway-sync[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Dockerfile
+          git commit -m "chore(sync): pin openclaw to ${NEW_DIGEST}" \
+                     -m "Tracking tag: ${NEW_TAG}" \
+                     -m "Previous digest: ${OLD_DIGEST}" \
+                     -m "Smoke test: /healthz responded within 180s"
+          # Defend against a maintainer pushing concurrently between checkout and push.
+          git pull --rebase origin main || true
+          git push
+
+      - name: Open issue on failure
+        if: failure() && github.event_name == 'schedule'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `sync-upstream cron failed: ${new Date().toISOString().split('T')[0]}`;
+            const body = [
+              `The daily sync-upstream cron failed.`,
+              ``,
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              ``,
+              `Common causes:`,
+              `- GHCR transient outage (re-run the workflow manually)`,
+              `- Upstream image smoke-test regressed (investigate before bumping)`,
+              `- UPSTREAM_TAG points at a non-existent tag`,
+              ``,
+              `If the issue is upstream, do not merge any related bump until it's resolved.`,
+            ].join('\n');
+
+            // Avoid filing a duplicate if one is already open.
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'sync-failure',
+            });
+            if (existing.length > 0) {
+              core.info(`An open sync-failure issue already exists (#${existing[0].number}); not filing another.`);
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['sync-failure'],
+            });
