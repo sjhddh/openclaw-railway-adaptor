@@ -18,8 +18,12 @@ printf 'openclaw-railway-adaptor: starting (port=%s, state=%s)\n' \
     "$port" "$state_dir"
 
 if [ "$(id -u)" = "0" ]; then
-    chown node:node /data 2>/dev/null || \
-        printf >&2 'WARN: could not chown /data (already correct, or readonly mount)\n'
+    # Reclaim the entire /data tree for the node user (uid 1000). Railway
+    # volumes can come up with files from a previous template's setup that
+    # are owned by a different uid — without -R, our gateway fails to read
+    # /data/<state_dir>/openclaw.json with EACCES on first boot.
+    chown -R node:node /data 2>/dev/null || \
+        printf >&2 'WARN: chown -R /data failed; some files may remain unreadable.\n'
     install -d -m 0755 -o node -g node "$state_dir" "$workspace_dir" 2>/dev/null || {
         printf >&2 'ERROR: cannot create state dirs under /data.\n'
         printf >&2 '       Attach a Railway volume at /data, or override\n'
