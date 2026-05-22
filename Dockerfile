@@ -7,7 +7,7 @@
 #
 # Upstream image: https://github.com/openclaw/openclaw/pkgs/container/openclaw
 
-FROM ghcr.io/openclaw/openclaw@sha256:8ecbd44d788db7048108a712802a98fad3f1f9a8a87f78fb111dc3fd0f8a9ed7
+FROM ghcr.io/openclaw/openclaw@sha256:a2a5cff3b2540236fc6cdc5222327841c6ff19056beb9e34f889aec0cd29b719
 
 USER root
 
